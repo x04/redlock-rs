@@ -1,11 +1,10 @@
 [package]
-
 name = "redlock"
 version = "1.0.0"
-authors = ["Jan-Erik Rediger <badboy@archlinux.us>"]
+authors = ["Jan-Erik Rediger <badboy@archlinux.us>", "cc <admin@splay.dev>"]
 
 keywords = ["distributed", "locking"]
-description = "Implementation of the distributed locking mechanism built on top of Redis"
+description = "Implementation of the distributed locking mechanism built on top of Redis, modified to use an r2d2 connection pool."
 
 homepage = "https://github.com/badboy/redlock-rs"
 repository = "https://github.com/badboy/redlock-rs"
@@ -15,5 +14,6 @@ readme = "README.md"
 edition = "2018"
 
 [dependencies]
-redis = "0.13.0"
-rand = "0.7.2"
+r2d2 = "0.8"
+redis = { version = "0.17", features = ["r2d2"] }
+rand = "0.7"

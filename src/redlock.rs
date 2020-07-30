@@ -2,10 +2,10 @@ use rand::{thread_rng, Rng};
 use redis::Value::Okay;
 use redis::{RedisResult, Value};
 
-use std::fs::File;
-use std::io::{self, Read};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+use std::error::Error;
+use std::ops::DerefMut;
 
 const DEFAULT_RETRY_COUNT: u32 = 3;
 const DEFAULT_RETRY_DELAY: u32 = 200;
@@ -22,8 +22,7 @@ const UNLOCK_SCRIPT: &str = r"if redis.call('get',KEYS[1]) == ARGV[1] then
 /// and handles the Redis connections.
 pub struct RedLock {
     /// List of all Redis clients
-    pub servers: Vec<redis::Client>,
-    quorum: u32,
+    pub pool: r2d2::Pool<redis::Client>,
     retry_count: u32,
     retry_delay: u32,
 }
@@ -45,34 +44,19 @@ impl RedLock {
     /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
     ///
     /// Sample URI: `"redis://127.0.0.1:6379"`
-    pub fn new(uris: Vec<&str>) -> RedLock {
-        let quorum = (uris.len() as u32) / 2 + 1;
-        let mut servers = Vec::with_capacity(uris.len());
-
-        for &uri in uris.iter() {
-            servers.push(redis::Client::open(uri).unwrap())
-        }
-
+    pub fn new(pool: r2d2::Pool<redis::Client>) -> RedLock {
         RedLock {
-            servers,
-            quorum,
+            pool,
             retry_count: DEFAULT_RETRY_COUNT,
             retry_delay: DEFAULT_RETRY_DELAY,
         }
     }
 
-    /// Get 20 random bytes from `/dev/urandom`.
-    pub fn get_unique_lock_id(&self) -> io::Result<Vec<u8>> {
-        let file = File::open("/dev/urandom")?;
-        let mut buf = Vec::with_capacity(20);
-        match file.take(20).read_to_end(&mut buf) {
-            Ok(20) => Ok(buf),
-            Ok(_) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Can't read enough random bytes",
-            )),
-            Err(e) => Err(e),
-        }
+    /// Get 20 random bytes.
+    pub fn get_unique_lock_id<RNG: rand::RngCore>(&self, rand: &mut RNG) -> Vec<u8> {
+        let mut randoms = Vec::with_capacity(20);
+        rand.fill_bytes(&mut randoms);
+        randoms
     }
 
     /// Set retry count and retry delay.
@@ -86,12 +70,11 @@ impl RedLock {
 
     fn lock_instance(
         &self,
-        client: &redis::Client,
         resource: &[u8],
         val: &[u8],
         ttl: usize,
     ) -> bool {
-        let mut con = match client.get_connection() {
+        let mut con = match self.pool.get() {
             Err(_) => return false,
             Ok(val) => val,
         };
@@ -101,7 +84,7 @@ impl RedLock {
             .arg("nx")
             .arg("px")
             .arg(ttl)
-            .query(&mut con);
+            .query(con.deref_mut());
         match result {
             Ok(Okay) => true,
             Ok(_) | Err(_) => false,
@@ -115,19 +98,13 @@ impl RedLock {
     ///
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
-    pub fn lock(&self, resource: &[u8], ttl: usize) -> Option<Lock> {
-        let val = self.get_unique_lock_id().unwrap();
-
+    pub fn lock(&self, resource: &[u8], ttl: usize) -> Result<Option<Lock>, Box<dyn Error>> {
         let mut rng = thread_rng();
+        let val = self.get_unique_lock_id(&mut rng);
 
         for _ in 0..self.retry_count {
-            let mut n = 0;
             let start_time = Instant::now();
-            for client in &self.servers {
-                if self.lock_instance(client, resource, &val, ttl) {
-                    n += 1;
-                }
-            }
+            let locked = self.lock_instance(resource, &val, ttl);
 
             let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
             let elapsed = start_time.elapsed();
@@ -136,201 +113,33 @@ impl RedLock {
                 - elapsed.as_secs() as usize * 1000
                 - elapsed.subsec_nanos() as usize / 1_000_000;
 
-            if n >= self.quorum && validity_time > 0 {
-                return Some(Lock {
+            if locked && validity_time > 0 {
+                return Ok(Some(Lock {
                     lock_manager: self,
                     resource: resource.to_vec(),
                     val,
                     validity_time,
-                });
+                }));
             } else {
-                for client in &self.servers {
-                    self.unlock_instance(client, resource, &val);
-                }
+                self.unlock(resource, &val);
             }
 
             let n = rng.gen_range(0, self.retry_delay);
             sleep(Duration::from_millis(u64::from(n)));
         }
-        None
+        Ok(None)
     }
 
-    fn unlock_instance(&self, client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
-        let mut con = match client.get_connection() {
+    fn unlock(&self, resource: &[u8], val: &[u8]) -> bool {
+        let mut con = match self.pool.get() {
             Err(_) => return false,
             Ok(val) => val,
         };
         let script = redis::Script::new(UNLOCK_SCRIPT);
-        let result: RedisResult<i32> = script.key(resource).arg(val).invoke(&mut con);
+        let result: RedisResult<i32> = script.key(resource).arg(val).invoke(con.deref_mut());
         match result {
             Ok(val) => val == 1,
             Err(_) => false,
         }
-    }
-
-    /// Unlock the given lock.
-    ///
-    /// Unlock is best effort. It will simply try to contact all instances
-    /// and remove the key.
-    pub fn unlock(&self, lock: &Lock) {
-        for client in &self.servers {
-            self.unlock_instance(client, &lock.resource, &lock.val);
-        }
-    }
-}
-
-#[test]
-fn test_redlock_get_unique_id() {
-    let rl = RedLock::new(vec![]);
-
-    match rl.get_unique_lock_id() {
-        Ok(id) => {
-            assert_eq!(20, id.len());
-        }
-        err => panic!("Error thrown: {:?}", err),
-    }
-}
-
-#[test]
-fn test_redlock_get_unique_id_uniqueness() {
-    let rl = RedLock::new(vec![]);
-
-    let id1 = rl.get_unique_lock_id().unwrap();
-    let id2 = rl.get_unique_lock_id().unwrap();
-
-    assert_eq!(20, id1.len());
-    assert_eq!(20, id2.len());
-    assert!(id1 != id2);
-}
-
-#[test]
-fn test_redlock_valid_instance() {
-    let rl = RedLock::new(vec![
-        "redis://127.0.0.1:6380/",
-        "redis://127.0.0.1:6381/",
-        "redis://127.0.0.1:6382/",
-    ]);
-    assert_eq!(3, rl.servers.len());
-    assert_eq!(2, rl.quorum);
-}
-
-#[test]
-fn test_redlock_direct_unlock_fails() {
-    let rl = RedLock::new(vec![
-        "redis://127.0.0.1:6380/",
-        "redis://127.0.0.1:6381/",
-        "redis://127.0.0.1:6382/",
-    ]);
-    let key = rl.get_unique_lock_id().unwrap();
-
-    let val = rl.get_unique_lock_id().unwrap();
-    assert_eq!(false, rl.unlock_instance(&rl.servers[0], &key, &val))
-}
-
-#[test]
-fn test_redlock_direct_unlock_succeeds() {
-    let rl = RedLock::new(vec![
-        "redis://127.0.0.1:6380/",
-        "redis://127.0.0.1:6381/",
-        "redis://127.0.0.1:6382/",
-    ]);
-    let key = rl.get_unique_lock_id().unwrap();
-
-    let val = rl.get_unique_lock_id().unwrap();
-    let mut con = rl.servers[0].get_connection().unwrap();
-    redis::cmd("SET").arg(&*key).arg(&*val).execute(&mut con);
-
-    assert_eq!(true, rl.unlock_instance(&rl.servers[0], &key, &val))
-}
-
-#[test]
-fn test_redlock_direct_lock_succeeds() {
-    let rl = RedLock::new(vec![
-        "redis://127.0.0.1:6380/",
-        "redis://127.0.0.1:6381/",
-        "redis://127.0.0.1:6382/",
-    ]);
-    let key = rl.get_unique_lock_id().unwrap();
-
-    let val = rl.get_unique_lock_id().unwrap();
-    let mut con = rl.servers[0].get_connection().unwrap();
-
-    redis::cmd("DEL").arg(&*key).execute(&mut con);
-    assert_eq!(true, rl.lock_instance(&rl.servers[0], &*key, &*val, 1000))
-}
-
-#[test]
-fn test_redlock_unlock() {
-    let rl = RedLock::new(vec![
-        "redis://127.0.0.1:6380/",
-        "redis://127.0.0.1:6381/",
-        "redis://127.0.0.1:6382/",
-    ]);
-    let key = rl.get_unique_lock_id().unwrap();
-
-    let val = rl.get_unique_lock_id().unwrap();
-    let mut con = rl.servers[0].get_connection().unwrap();
-    let _: () = redis::cmd("SET")
-        .arg(&*key)
-        .arg(&*val)
-        .query(&mut con)
-        .unwrap();
-
-    let lock = Lock {
-        lock_manager: &rl,
-        resource: key,
-        val,
-        validity_time: 0,
-    };
-    assert_eq!((), rl.unlock(&lock))
-}
-
-#[test]
-fn test_redlock_lock() {
-    let rl = RedLock::new(vec![
-        "redis://127.0.0.1:6380/",
-        "redis://127.0.0.1:6381/",
-        "redis://127.0.0.1:6382/",
-    ]);
-
-    let key = rl.get_unique_lock_id().unwrap();
-    match rl.lock(&key, 1000) {
-        Some(lock) => {
-            assert_eq!(key, lock.resource);
-            assert_eq!(20, lock.val.len());
-            assert!(lock.validity_time > 900);
-        }
-        None => panic!("Lock failed"),
-    }
-}
-
-#[test]
-fn test_redlock_lock_unlock() {
-    let rl = RedLock::new(vec![
-        "redis://127.0.0.1:6380/",
-        "redis://127.0.0.1:6381/",
-        "redis://127.0.0.1:6382/",
-    ]);
-    let rl2 = RedLock::new(vec![
-        "redis://127.0.0.1:6380/",
-        "redis://127.0.0.1:6381/",
-        "redis://127.0.0.1:6382/",
-    ]);
-
-    let key = rl.get_unique_lock_id().unwrap();
-
-    let lock = rl.lock(&key, 1000).unwrap();
-    assert!(lock.validity_time > 900);
-
-    match rl2.lock(&key, 1000) {
-        Some(_l) => panic!("Lock acquired, even though it should be locked"),
-        None => (),
-    }
-
-    rl.unlock(&lock);
-
-    match rl2.lock(&key, 1000) {
-        Some(l) => assert!(l.validity_time > 900),
-        None => panic!("Lock couldn't be acquired"),
     }
 }
