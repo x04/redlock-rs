@@ -40,7 +40,7 @@ pub struct Lock<'a> {
 }
 
 #[async_trait]
-trait LockUnlock {
+pub trait LockUnlock {
     async fn unlock(&self) -> bool;
 }
 
