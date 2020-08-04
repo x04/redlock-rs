@@ -27,6 +27,9 @@ pub struct RedLock {
     pub pool: r2d2::Pool<redis::Client>,
 }
 
+unsafe impl Send for RedLock {}
+unsafe impl Sync for RedLock {}
+
 pub struct Lock<'a> {
     /// The resource to lock. Will be used as the key in Redis.
     pub resource: Vec<u8>,
@@ -38,6 +41,9 @@ pub struct Lock<'a> {
     /// Used to limit the lifetime of a lock to its lock manager.
     pub lock_manager: &'a RedLock,
 }
+
+unsafe impl Send for Lock<'_> {}
+unsafe impl Sync for Lock<'_> {}
 
 #[async_trait]
 pub trait LockUnlock {
