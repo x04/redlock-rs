@@ -106,7 +106,6 @@ impl RedLock {
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
     pub async fn lock(&self, resource: &[u8], ttl: usize, retry_count: Option<u32>, retry_delay: Option<u32>) -> Result<Option<Lock<'_>>, Box<dyn Error + Send>> {
-        let mut rng = thread_rng();
         let val = self.get_unique_lock_id();
 
         let retry_count = match retry_count {
@@ -139,7 +138,7 @@ impl RedLock {
                 let _ = self.unlock(resource, &val);
             }
 
-            let n: u64 = rng.gen_range(0, retry_delay).into();
+            let n: u64 = thread_rng().gen_range(0, retry_delay).into();
             tokio::time::delay_for(Duration::from_millis(n)).await;
         }
         Ok(None)
