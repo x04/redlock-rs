@@ -1,11 +1,10 @@
-use async_trait::async_trait;
-
 use rand::{thread_rng, Rng};
-use redis::Value::Okay;
-use redis::{RedisResult, Value};
+use bb8_redis::{
+    redis,
+    redis::{RedisResult, Value, Value::Okay}
+};
 
 use std::error::Error;
-use std::ops::DerefMut;
 
 use tokio::time::{Duration, Instant};
 
@@ -24,7 +23,7 @@ const UNLOCK_SCRIPT: &str = r"if redis.call('get',KEYS[1]) == ARGV[1] then
 /// and handles the Redis connections.
 pub struct RedLock {
     /// List of all Redis clients
-    pub pool: r2d2::Pool<redis::Client>,
+    pub pool: bb8_redis::RedisPool,
 }
 
 pub struct Lock<'a> {
@@ -39,26 +38,9 @@ pub struct Lock<'a> {
     pub lock_manager: &'a RedLock,
 }
 
-#[async_trait]
-pub trait LockUnlock {
-    async fn unlock(&self) -> bool;
-}
-
-#[async_trait]
-impl LockUnlock for Lock<'_> {
-    async fn unlock(&self) -> bool {
-        self.lock_manager.unlock(self.resource.as_slice(), self.val.as_slice()).await
-    }
-}
-
-#[async_trait]
-trait UnlockLock {
-    async fn unlock(&self, resource: &[u8], val: &[u8]) -> bool;
-}
-
 impl RedLock {
     /// Create a new lock manager instance, defined by the given Redis connection pool.
-    pub fn new(pool: r2d2::Pool<redis::Client>) -> RedLock {
+    pub fn new(pool: bb8_redis::RedisPool) -> RedLock {
         RedLock {
             pool,
         }
@@ -69,23 +51,23 @@ impl RedLock {
         uuid::Uuid::new_v4().as_bytes().to_vec()
     }
 
-    fn lock_instance(
+    async fn lock_instance(
         &self,
         resource: &[u8],
         val: &[u8],
         ttl: usize,
     ) -> bool {
-        let mut con = match self.pool.get() {
-            Err(_) => return false,
-            Ok(val) => val,
-        };
+        let mut con = self.pool.get().await.unwrap();
+        let con = con.as_mut().unwrap();
+
         let result: RedisResult<Value> = redis::cmd("SET")
             .arg(resource)
             .arg(val)
             .arg("nx")
             .arg("px")
             .arg(ttl)
-            .query(con.deref_mut());
+            .query_async(con)
+            .await;
         match result {
             Ok(Okay) => true,
             Ok(_) | Err(_) => false,
@@ -112,7 +94,7 @@ impl RedLock {
         };
         for _ in 0..retry_count {
             let start_time = Instant::now();
-            let locked = self.lock_instance(resource, &val, ttl);
+            let locked = self.lock_instance(resource, &val, ttl).await;
 
             let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
             let elapsed = start_time.elapsed();
@@ -139,15 +121,13 @@ impl RedLock {
     }
 }
 
-#[async_trait]
-impl UnlockLock for RedLock {
+impl RedLock {
     async fn unlock(&self, resource: &[u8], val: &[u8]) -> bool {
-        let mut con = match self.pool.get() {
-            Err(_) => return false,
-            Ok(val) => val,
-        };
+        let mut con = self.pool.get().await.unwrap();
+        let con = con.as_mut().unwrap();
+
         let script = redis::Script::new(UNLOCK_SCRIPT);
-        let result: RedisResult<i32> = script.key(resource).arg(val).invoke(con.deref_mut());
+        let result: RedisResult<i32> = script.key(resource).arg(val).invoke_async(con).await;
         match result {
             Ok(val) => val == 1,
             Err(_) => false,
