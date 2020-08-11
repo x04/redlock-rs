@@ -38,6 +38,12 @@ pub struct Lock<'a> {
     pub lock_manager: &'a RedLock,
 }
 
+impl Lock<'_> {
+    pub async fn unlock(&self) -> bool {
+        self.lock_manager.unlock(self.resource.as_slice(), self.val.as_slice()).await
+    }
+}
+
 impl RedLock {
     /// Create a new lock manager instance, defined by the given Redis connection pool.
     pub fn new(pool: bb8_redis::RedisPool) -> RedLock {
