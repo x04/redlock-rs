@@ -15,8 +15,17 @@ edition = "2018"
 
 [dependencies]
 rand = "0.7"
-tokio = { version = "0.2", default-features = false, features = ["time"] }
 uuid = { version = "0.8", features = ["v4"] }
 
 [dependencies.bb8-redis]
 git = "https://github.com/khuey/bb8"
+
+[dependencies.tokio]
+version = "0.2"
+default-features = false
+features = ["time"]
+
+[dependencies.redis]
+version = "0.17"
+default-features = false
+features = ["tokio-comp", "script"]
