@@ -122,7 +122,7 @@ impl RedLock {
 }
 
 impl RedLock {
-    async fn unlock(&self, resource: &[u8], val: &[u8]) -> bool {
+    pub async fn unlock(&self, resource: &[u8], val: &[u8]) -> bool {
         let mut con = self.pool.get().await.unwrap();
         let con = con.as_mut().unwrap();
 
