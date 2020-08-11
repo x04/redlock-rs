@@ -1,5 +1,6 @@
 use rand::{thread_rng, Rng};
 use bb8_redis::{
+    bb8,
     redis,
     redis::{RedisResult, Value, Value::Okay}
 };
@@ -7,6 +8,7 @@ use bb8_redis::{
 use std::error::Error;
 
 use tokio::time::{Duration, Instant};
+use std::ops::DerefMut;
 
 const DEFAULT_RETRY_COUNT: u32 = 5;
 const DEFAULT_RETRY_DELAY: u32 = 250;
@@ -23,7 +25,7 @@ const UNLOCK_SCRIPT: &str = r"if redis.call('get',KEYS[1]) == ARGV[1] then
 /// and handles the Redis connections.
 pub struct RedLock {
     /// List of all Redis clients
-    pub pool: bb8_redis::RedisPool,
+    pub pool: bb8::Pool<bb8_redis::RedisConnectionManager>,
 }
 
 pub struct Lock<'a> {
@@ -46,7 +48,7 @@ impl Lock<'_> {
 
 impl RedLock {
     /// Create a new lock manager instance, defined by the given Redis connection pool.
-    pub fn new(pool: bb8_redis::RedisPool) -> RedLock {
+    pub fn new(pool: bb8::Pool<bb8_redis::RedisConnectionManager>) -> RedLock {
         RedLock {
             pool,
         }
@@ -64,15 +66,13 @@ impl RedLock {
         ttl: usize,
     ) -> bool {
         let mut con = self.pool.get().await.unwrap();
-        let con = con.as_mut().unwrap();
-
         let result: RedisResult<Value> = redis::cmd("SET")
             .arg(resource)
             .arg(val)
             .arg("nx")
             .arg("px")
             .arg(ttl)
-            .query_async(con)
+            .query_async(con.deref_mut())
             .await;
         match result {
             Ok(Okay) => true,
@@ -130,10 +130,9 @@ impl RedLock {
 impl RedLock {
     pub async fn unlock(&self, resource: &[u8], val: &[u8]) -> bool {
         let mut con = self.pool.get().await.unwrap();
-        let con = con.as_mut().unwrap();
 
         let script = redis::Script::new(UNLOCK_SCRIPT);
-        let result: RedisResult<i32> = script.key(resource).arg(val).invoke_async(con).await;
+        let result: RedisResult<i32> = script.key(resource).arg(val).invoke_async(con.deref_mut()).await;
         match result {
             Ok(val) => val == 1,
             Err(_) => false,
