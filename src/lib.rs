@@ -26,4 +26,5 @@
 
 mod redlock;
 
+pub use bb8_redis;
 pub use crate::redlock::{Lock, RedLock};
