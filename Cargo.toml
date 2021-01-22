@@ -27,6 +27,6 @@ default-features = false
 features = ["time"]
 
 [dependencies.redis]
-version = "0.17"
+version = "0.19"
 default-features = false
 features = ["tokio-comp", "script"]
