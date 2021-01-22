@@ -19,6 +19,7 @@ uuid = { version = "0.8", features = ["v4"] }
 
 [dependencies.bb8-redis]
 git = "https://github.com/djc/bb8"
+branch = "main"
 
 [dependencies.tokio]
 version = "0.2"
