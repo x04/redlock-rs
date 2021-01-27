@@ -121,7 +121,7 @@ impl RedLock {
             }
 
             let n: u64 = thread_rng().gen_range(0, retry_delay).into();
-            tokio::time::delay_for(Duration::from_millis(n)).await;
+            tokio::time::sleep(Duration::from_millis(n)).await;
         }
         Ok(None)
     }

@@ -18,14 +18,15 @@ rand = "0.7"
 uuid = { version = "0.8", features = ["v4"] }
 
 [dependencies.bb8-redis]
-version = "0.7"
+git = "https://github.com/djc/bb8"
+branch = "main"
 
 [dependencies.tokio]
-version = "0.2"
+version = "1.1"
 default-features = false
 features = ["time"]
 
 [dependencies.redis]
-version = "0.18"
+version = "0.19"
 default-features = false
 features = ["tokio-comp", "script"]
