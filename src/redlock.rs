@@ -8,7 +8,6 @@ use bb8_redis::{
 use std::error::Error;
 
 use tokio::time::{Duration, Instant};
-use std::ops::DerefMut;
 
 const DEFAULT_RETRY_COUNT: u32 = 5;
 const DEFAULT_RETRY_DELAY: u32 = 250;
@@ -25,7 +24,7 @@ const UNLOCK_SCRIPT: &str = r"if redis.call('get',KEYS[1]) == ARGV[1] then
 /// and handles the Redis connections.
 pub struct RedLock {
     /// List of all Redis clients
-    pub pool: bb8::Pool<bb8_redis::RedisConnectionManager>,
+    pub conn: redis::aio::Connection,
 }
 
 pub struct Lock<'a> {
@@ -37,20 +36,21 @@ pub struct Lock<'a> {
     /// Should only be slightly smaller than the requested TTL.
     pub validity_time: usize,
     /// Used to limit the lifetime of a lock to its lock manager.
-    pub lock_manager: &'a RedLock,
+    pub lock_manager: &'a mut RedLock,
 }
 
 impl Lock<'_> {
-    pub async fn unlock(&self) -> bool {
+    pub async fn unlock(&mut self) -> bool {
         self.lock_manager.unlock(self.resource.as_slice(), self.val.as_slice()).await
     }
 }
 
 impl RedLock {
     /// Create a new lock manager instance, defined by the given Redis connection pool.
-    pub fn new(pool: bb8::Pool<bb8_redis::RedisConnectionManager>) -> RedLock {
+    pub async fn new(pool: bb8::Pool<bb8_redis::RedisConnectionManager>) -> RedLock {
+        let conn = pool.dedicated_connection().await.unwrap();
         RedLock {
-            pool,
+            conn,
         }
     }
 
@@ -60,19 +60,18 @@ impl RedLock {
     }
 
     async fn lock_instance(
-        &self,
+        &mut self,
         resource: &[u8],
         val: &[u8],
         ttl: usize,
     ) -> bool {
-        let mut con = self.pool.get().await.unwrap();
         let result: RedisResult<Value> = redis::cmd("SET")
             .arg(resource)
             .arg(val)
             .arg("nx")
             .arg("px")
             .arg(ttl)
-            .query_async(con.deref_mut())
+            .query_async(&mut self.conn)
             .await;
         match result {
             Ok(Okay) => true,
@@ -87,7 +86,7 @@ impl RedLock {
     ///
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
-    pub async fn lock(&self, resource: &[u8], ttl: usize, retry_count: Option<u32>, retry_delay: Option<u32>) -> Result<Option<Lock<'_>>, Box<dyn Error + Send>> {
+    pub async fn lock(&mut self, resource: &[u8], ttl: usize, retry_count: Option<u32>, retry_delay: Option<u32>) -> Result<Option<Lock<'_>>, Box<dyn Error + Send>> {
         let val = self.get_unique_lock_id();
 
         let retry_count = match retry_count {
@@ -126,11 +125,9 @@ impl RedLock {
         Ok(None)
     }
 
-    pub async fn unlock(&self, resource: &[u8], val: &[u8]) -> bool {
-        let mut con = self.pool.get().await.unwrap();
-
+    pub async fn unlock(&mut self, resource: &[u8], val: &[u8]) -> bool {
         let script = redis::Script::new(UNLOCK_SCRIPT);
-        let result: RedisResult<i32> = script.key(resource).arg(val).invoke_async(con.deref_mut()).await;
+        let result: RedisResult<i32> = script.key(resource).arg(val).invoke_async(&mut self.conn).await;
         match result {
             Ok(val) => val == 1,
             Err(_) => false,
